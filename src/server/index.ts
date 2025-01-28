@@ -1,35 +1,50 @@
-import express from 'express';
+import express, { Request, Response, NextFunction } from 'express';
 import cors from 'cors';
 import http from 'http';
 import { PrismaClient } from '@prisma/client';
-import { Redis } from 'ioredis';
+import { Redis, RedisOptions } from 'ioredis';
 import dotenv from 'dotenv';
-import WebSocketServer from './services/websocket';
-import { setupNotificationProcessor } from './jobs/notification-processor';
-import { setupSubscriptionNotificationJobs } from './jobs/subscription-notifications';
 
-// Import routes
-import authRoutes from './routes/auth';
-import userRoutes from './routes/users';
-import matchingRoutes from './routes/matching';
-import subscriptionRoutes from './routes/subscriptions';
-import messagesRoutes from './routes/messages';
-import analyticsRoutes from './routes/analytics';
-import notificationRoutes from './routes/notifications';
-import uploadRoutes from './routes/upload';
-import verificationRoutes from './routes/verification';
-import usageRoutes from './routes/usage';
-import devRoutes from './routes/dev';
-
-// Import middleware
-import { authenticateToken } from './middleware/auth';
-
-// Initialize environment variables
+// Initialize environment variables first
 dotenv.config();
 
-// Initialize database and cache clients
+// Import local modules with proper paths
+import { WebSocketServer } from './services/websocket/WebSocketServer';
+import { NotificationProcessor } from './services/notifications/NotificationProcessor';
+import { SubscriptionNotificationService } from './services/notifications/SubscriptionNotificationService';
+
+// Import routes
+import authRouter from './routes/auth/auth.routes';
+import userRouter from './routes/users/users.routes';
+import matchingRouter from './routes/matching/matching.routes';
+import subscriptionRouter from './routes/subscriptions/subscriptions.routes';
+import messagesRouter from './routes/messages/messages.routes';
+import analyticsRouter from './routes/analytics/analytics.routes';
+import notificationRouter from './routes/notifications/notifications.routes';
+import uploadRouter from './routes/upload/upload.routes';
+import verificationRouter from './routes/verification/verification.routes';
+import usageRouter from './routes/usage/usage.routes';
+import devRouter from './routes/dev/dev.routes';
+
+// Import middleware
+import { authenticateToken } from './middleware/auth/auth.middleware';
+
+// Initialize database client
 const prisma = new PrismaClient();
-const redis = new Redis(process.env.REDIS_URL);
+
+// Configure Redis options
+const redisConfig: RedisOptions = {
+  host: process.env.REDIS_HOST || 'localhost',
+  port: parseInt(process.env.REDIS_PORT || '6379'),
+  password: process.env.REDIS_PASSWORD,
+  retryStrategy: (times: number) => {
+    const delay = Math.min(times * 50, 2000);
+    return delay;
+  }
+};
+
+// Initialize Redis client with proper configuration
+const redis = new Redis(redisConfig);
 
 // Create Express app and HTTP server
 const app = express();
@@ -39,46 +54,43 @@ const server = http.createServer(app);
 const wsServer = new WebSocketServer(server);
 app.set('wsServer', wsServer);
 
-// Set up notification processors
-const notificationScheduler = setupNotificationProcessor(wsServer);
-app.set('notificationScheduler', notificationScheduler);
-
-// Set up subscription notification jobs
-setupSubscriptionNotificationJobs(wsServer);
+// Set up notification services
+const notificationProcessor = new NotificationProcessor(wsServer);
+const subscriptionNotifications = new SubscriptionNotificationService(wsServer);
 
 // Middleware
 app.use(cors({
-  origin: process.env.FRONTEND_URL,
+  origin: process.env.FRONTEND_URL || 'http://localhost:3000',
   credentials: true
 }));
 app.use(express.json());
 
 // Health check endpoint
-app.get('/health', (req, res) => {
+app.get('/health', (req: Request, res: Response) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
 // Public routes
-app.use('/api/auth', authRoutes);
+app.use('/api/auth', authRouter);
 
 // Protected routes
-app.use('/api/users', authenticateToken, userRoutes);
-app.use('/api/matching', authenticateToken, matchingRoutes);
-app.use('/api/subscriptions', authenticateToken, subscriptionRoutes);
-app.use('/api/messages', authenticateToken, messagesRoutes);
-app.use('/api/analytics', authenticateToken, analyticsRoutes);
-app.use('/api/notifications', authenticateToken, notificationRoutes);
-app.use('/api/upload', authenticateToken, uploadRoutes);
-app.use('/api/verification', authenticateToken, verificationRoutes);
-app.use('/api/usage', authenticateToken, usageRoutes);
+app.use('/api/users', authenticateToken, userRouter);
+app.use('/api/matching', authenticateToken, matchingRouter);
+app.use('/api/subscriptions', authenticateToken, subscriptionRouter);
+app.use('/api/messages', authenticateToken, messagesRouter);
+app.use('/api/analytics', authenticateToken, analyticsRouter);
+app.use('/api/notifications', authenticateToken, notificationRouter);
+app.use('/api/upload', authenticateToken, uploadRouter);
+app.use('/api/verification', authenticateToken, verificationRouter);
+app.use('/api/usage', authenticateToken, usageRouter);
 
 // Development routes
 if (process.env.NODE_ENV === 'development') {
-  app.use('/api/dev', devRoutes);
+  app.use('/api/dev', devRouter);
 }
 
 // Global error handling
-app.use((err: Error, req: express.Request, res: express.Response, next: express.NextFunction) => {
+app.use((err: Error, req: Request, res: Response, next: NextFunction) => {
   console.error('Unhandled error:', err);
   res.status(500).json({
     error: process.env.NODE_ENV === 'development' ? err.message : 'Internal server error'
@@ -91,7 +103,7 @@ const gracefulShutdown = async () => {
   
   try {
     // Close all WebSocket connections
-    wsServer.close();
+    await wsServer.close();
     
     // Disconnect from Redis
     await redis.quit();
